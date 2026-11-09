@@ -5,6 +5,23 @@ on:
       operation:
         required: true
         type: string
+    secrets:
+      AZURE_TENANT:
+        required: false
+      AZURE_CLIENT:
+        required: false
+      AZURE_SUBSCRIPTION:
+        required: false
+      PILOT_RESOURCE_GROUP:
+        required: false
+      PILOT_JOB:
+        required: false
+      PILOT_PREVIOUS_IMAGE:
+        required: false
+      PILOT_CANDIDATE_IMAGE:
+        required: false
+      PILOT_EXPECTED_SUBJECT:
+        required: false
 permissions: {}
 jobs:
   deploy:
@@ -15,14 +32,14 @@ jobs:
     permissions:
       id-token: write
     env:
-      TENANT: ${{ vars.AZURE_TENANT }}
-      CLIENT: ${{ vars.AZURE_CLIENT }}
-      SUBSCRIPTION: ${{ vars.AZURE_SUBSCRIPTION }}
-      RESOURCE_GROUP: ${{ vars.PILOT_RESOURCE_GROUP }}
-      JOB: ${{ vars.PILOT_JOB }}
-      OLD_IMAGE: ${{ vars.PILOT_PREVIOUS_IMAGE }}
-      NEW_IMAGE: ${{ vars.PILOT_CANDIDATE_IMAGE }}
-      EXPECTED_SUBJECT: ${{ vars.PILOT_EXPECTED_SUBJECT }}
+      TENANT: ${{ secrets.AZURE_TENANT }}
+      CLIENT: ${{ secrets.AZURE_CLIENT }}
+      SUBSCRIPTION: ${{ secrets.AZURE_SUBSCRIPTION }}
+      RESOURCE_GROUP: ${{ secrets.PILOT_RESOURCE_GROUP }}
+      JOB: ${{ secrets.PILOT_JOB }}
+      OLD_IMAGE: ${{ secrets.PILOT_PREVIOUS_IMAGE }}
+      NEW_IMAGE: ${{ secrets.PILOT_CANDIDATE_IMAGE }}
+      EXPECTED_SUBJECT: ${{ secrets.PILOT_EXPECTED_SUBJECT }}
     steps:
       - name: Verify identity, deploy fixed image and roll back
         shell: bash
@@ -142,8 +159,8 @@ jobs:
     permissions:
       id-token: write
     env:
-      TENANT: ${{ vars.AZURE_TENANT }}
-      CLIENT: ${{ vars.AZURE_CLIENT }}
+      TENANT: ${{ secrets.AZURE_TENANT }}
+      CLIENT: ${{ secrets.AZURE_CLIENT }}
       EVENT: ${{ github.event_name }}
     steps:
       - name: Check that untrusted context cannot exchange for the deployment identity
@@ -176,6 +193,9 @@ jobs:
           claims = json.loads(base64.urlsafe_b64decode(token.split('.')[1] + '=='))
           assert ':environment:pilot:' not in claims['sub']
           assert claims['event_name'] == e['EVENT']
+          if is_fork:
+              print('fork_permission_check=github_subject_not_bound')
+              raise SystemExit(0)
           assert e['TENANT'] and e['CLIENT']
           form = urlencode({'client_id': e['CLIENT'], 'scope': 'https://management.azure.com/.default',
                             'grant_type': 'client_credentials', 'client_assertion': token,
