@@ -1,0 +1,17 @@
+name: Run Azure deployment pilot
+on:
+  workflow_dispatch:
+permissions: {}
+jobs:
+  rollout:
+    permissions:
+      id-token: write
+    uses: QuantStrategyLab/qsl-monitor-deploy-pilot/.github/workflows/azure-job-deploy.yml@5e95ed32383f187cf31de6e38f975a40142d1dd0
+    with:
+      operation: roundtrip
+  wrong-context:
+    permissions:
+      id-token: write
+    uses: QuantStrategyLab/qsl-monitor-deploy-pilot/.github/workflows/azure-job-deploy.yml@5e95ed32383f187cf31de6e38f975a40142d1dd0
+    with:
+      operation: unbound

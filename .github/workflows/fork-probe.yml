@@ -1,0 +1,20 @@
+name: Verify fork deployment permissions
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+permissions: {}
+jobs:
+  fork-token-check:
+    if: github.event.pull_request.head.repo.fork
+    permissions:
+      id-token: write
+    uses: QuantStrategyLab/qsl-monitor-deploy-pilot/.github/workflows/azure-job-deploy.yml@5e95ed32383f187cf31de6e38f975a40142d1dd0
+    with:
+      operation: fork
+  try-deploy:
+    if: github.event.pull_request.head.repo.fork
+    permissions:
+      id-token: write
+    uses: QuantStrategyLab/qsl-monitor-deploy-pilot/.github/workflows/azure-job-deploy.yml@5e95ed32383f187cf31de6e38f975a40142d1dd0
+    with:
+      operation: roundtrip
