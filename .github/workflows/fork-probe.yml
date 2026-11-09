@@ -8,13 +8,13 @@ jobs:
     if: github.event.pull_request.head.repo.fork
     permissions:
       id-token: write
-    uses: QuantStrategyLab/qsl-monitor-deploy-pilot/.github/workflows/azure-job-deploy.yml@5e95ed32383f187cf31de6e38f975a40142d1dd0
+    uses: QuantStrategyLab/qsl-monitor-deploy-pilot/.github/workflows/azure-job-deploy.yml@56cbbfc3b2d03873e2143190b5ed977943cda0ef
     with:
       operation: fork
   try-deploy:
     if: github.event.pull_request.head.repo.fork
     permissions:
       id-token: write
-    uses: QuantStrategyLab/qsl-monitor-deploy-pilot/.github/workflows/azure-job-deploy.yml@5e95ed32383f187cf31de6e38f975a40142d1dd0
+    uses: QuantStrategyLab/qsl-monitor-deploy-pilot/.github/workflows/azure-job-deploy.yml@56cbbfc3b2d03873e2143190b5ed977943cda0ef
     with:
       operation: roundtrip

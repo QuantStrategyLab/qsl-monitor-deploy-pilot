@@ -6,12 +6,15 @@ jobs:
   rollout:
     permissions:
       id-token: write
-    uses: QuantStrategyLab/qsl-monitor-deploy-pilot/.github/workflows/azure-job-deploy.yml@5e95ed32383f187cf31de6e38f975a40142d1dd0
+    uses: QuantStrategyLab/qsl-monitor-deploy-pilot/.github/workflows/azure-job-deploy.yml@56cbbfc3b2d03873e2143190b5ed977943cda0ef
     with:
       operation: roundtrip
   wrong-context:
     permissions:
       id-token: write
-    uses: QuantStrategyLab/qsl-monitor-deploy-pilot/.github/workflows/azure-job-deploy.yml@5e95ed32383f187cf31de6e38f975a40142d1dd0
+    uses: QuantStrategyLab/qsl-monitor-deploy-pilot/.github/workflows/azure-job-deploy.yml@56cbbfc3b2d03873e2143190b5ed977943cda0ef
     with:
       operation: unbound
+    secrets:
+      AZURE_TENANT: ${{ secrets.AZURE_TENANT }}
+      AZURE_CLIENT: ${{ secrets.AZURE_CLIENT }}
