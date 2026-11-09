@@ -75,8 +75,8 @@ jobs:
                   raise RuntimeError(f"{method} returned HTTP {error.code}") from None
 
 
-          def wait_for(fetch, complete):
-              deadline = time.monotonic() + 140
+          def wait_for(fetch, complete, seconds):
+              deadline = time.monotonic() + seconds
               while time.monotonic() < deadline:
                   result = fetch()
                   if complete(result):
@@ -86,6 +86,8 @@ jobs:
 
 
           class AzureJob:
+              readback_seconds = 285
+
               def __init__(self, resource):
                   pattern = r"/subscriptions/[0-9a-f-]{36}/resourceGroups/[\w.()-]+/providers/Microsoft\.App/jobs/[\w-]+"
                   if not re.fullmatch(pattern, resource, re.IGNORECASE):
@@ -123,6 +125,8 @@ jobs:
 
 
           class CloudRunJob:
+              readback_seconds = 140
+
               def __init__(self, resource):
                   if not re.fullmatch(r"projects/[\w-]+/locations/[\w-]+/jobs/[\w-]+", resource):
                       raise ValueError("Expected a Cloud Run Job resource name")
@@ -159,6 +163,10 @@ jobs:
                       raise RuntimeError("Cloud Run update operation failed")
 
 
+          def job_containers(template):
+              return template["containers"] if "containers" in template else template["template"]["containers"]
+
+
           def release(job, previous, candidate, operation):
               image_pattern = r"[a-z0-9][a-z0-9._/-]*@sha256:[a-f0-9]{64}"
               if not all(re.fullmatch(image_pattern, image) for image in (previous, candidate)):
@@ -172,13 +180,16 @@ jobs:
               if not job.ready(before):
                   raise RuntimeError("Job is not ready for an update")
               template = copy.deepcopy(job.template(before))
-              containers = template.get("containers") or template["template"]["containers"]
+              containers = job_containers(template)
               if len(containers) != 1 or containers[0]["image"] != expected:
                   raise RuntimeError("Job must have one container with the expected source image")
               containers[0]["image"] = target
               job.update(before, template)
-              after = wait_for(job.read, lambda row: job.ready(row) and job.template(row) == template)
-              if job.other_config(after) != job.other_config(before):
+              def has_target_image(row):
+                  return job.ready(row) and [c["image"] for c in job_containers(job.template(row))] == [target]
+
+              after = wait_for(job.read, has_target_image, job.readback_seconds)
+              if job.template(after) != template or job.other_config(after) != job.other_config(before):
                   raise RuntimeError("Job configuration changed during the image update")
               print(f"{operation} verified: fixed image and unchanged job configuration")
 
