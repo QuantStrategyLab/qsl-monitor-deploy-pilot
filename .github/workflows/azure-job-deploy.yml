@@ -2,7 +2,10 @@ name: Azure job deployment pilot
 on:
   workflow_call:
     inputs:
-      operation:
+      fork_run:
+        required: true
+        type: string
+      fork_pr:
         required: true
         type: string
     secrets:
@@ -25,13 +28,20 @@ on:
 permissions: {}
 jobs:
   deploy:
-    if: inputs.operation == 'roundtrip' && github.event_name == 'workflow_dispatch' && github.repository == 'QuantStrategyLab/qsl-monitor-deploy-pilot' && github.ref == 'refs/heads/pilot-oidc-proof'
+    if: github.event_name == 'workflow_dispatch' && github.repository == 'QuantStrategyLab/qsl-monitor-deploy-pilot' && github.ref == 'refs/heads/pilot-integrated'
     runs-on: ubuntu-latest
     timeout-minutes: 9
     environment: pilot
     permissions:
       id-token: write
+      actions: read
+      pull-requests: read
     env:
+      FORK_RUN: ${{ inputs.fork_run }}
+      FORK_PR: ${{ inputs.fork_pr }}
+      CALLER_SHA: ${{ github.sha }}
+      REPO: ${{ github.repository }}
+      GITHUB_TOKEN: ${{ github.token }}
       TENANT: ${{ secrets.AZURE_TENANT }}
       CLIENT: ${{ secrets.AZURE_CLIENT }}
       SUBSCRIPTION: ${{ secrets.AZURE_SUBSCRIPTION }}
@@ -62,24 +72,56 @@ jobs:
               except HTTPError as error:
                   raise RuntimeError(f'{method} HTTP {error.code}') from None
 
-          audience = 'api://AzureADTokenExchange'
           env = os.environ
-          assertion = req(env['ACTIONS_ID_TOKEN_REQUEST_URL'] + '&' + urlencode({'audience': audience}),
+          assert all(re.fullmatch(r'[1-9][0-9]*', env[name]) for name in ('FORK_RUN', 'FORK_PR'))
+          def github(suffix):
+              return req(f'https://api.github.com/repos/{env["REPO"]}/{suffix}',
+                         headers={'Authorization': 'Bearer ' + env['GITHUB_TOKEN'],
+                                  'Accept': 'application/vnd.github+json'})
+
+          pr = github('pulls/' + env['FORK_PR'])
+          run = github('actions/runs/' + env['FORK_RUN'])
+          files = github('pulls/' + env['FORK_PR'] + '/files')
+          assert pr['base']['sha'] == env['CALLER_SHA'] and pr['base']['ref'] == 'pilot-integrated'
+          assert pr['head']['repo']['fork'] and pr['head']['repo']['full_name'] != env['REPO']
+          assert [item['filename'] for item in files] == ['README.md']
+          assert run['head_sha'] == pr['head']['sha'] and run['event'] == 'pull_request'
+          assert run['path'] == '.github/workflows/fork-probe.yml' and run['conclusion'] == 'success'
+          jobs = github('actions/runs/' + env['FORK_RUN'] + '/jobs')['jobs']
+          job, = jobs
+          assert job['name'] == 'Deny fork deployment access' and job['conclusion'] == 'success'
+          assert any(step['name'] == 'Verify GitHub denies OIDC to the fork'
+                     and step['conclusion'] == 'success' for step in job['steps'])
+          print('fork_permission_proof=verified; run=' + env['FORK_RUN'])
+
+          audience = 'api://AzureADTokenExchange'
+          def assertion_for(aud):
+              value = req(env['ACTIONS_ID_TOKEN_REQUEST_URL'] + '&' + urlencode({'audience': aud}),
                           headers={'Authorization': 'Bearer ' + env['ACTIONS_ID_TOKEN_REQUEST_TOKEN']})['value']
-          claims = json.loads(base64.urlsafe_b64decode(assertion.split('.')[1] + '=='))
-          assert claims['aud'] == audience, 'unexpected OIDC audience'
-          if claims['sub'] != env['EXPECTED_SUBJECT']:
-              assert re.fullmatch(r'[a-zA-Z0-9_./:@%-]{1,350}', claims['sub'])
-              print('public_pilot_subject=' + claims['sub'])
-              raise AssertionError('exact OIDC subject differs from pilot configuration')
-          assert claims['event_name'] == 'workflow_dispatch' and claims['ref'] == 'refs/heads/pilot-oidc-proof'
-          token = req(f'https://login.microsoftonline.com/{env["TENANT"]}/oauth2/v2.0/token',
-                      method='POST', headers={'Content-Type': 'application/x-www-form-urlencoded'},
-                      data=urlencode({'client_id': env['CLIENT'], 'scope': 'https://management.azure.com/.default',
-                          'grant_type': 'client_credentials', 'client_assertion': assertion,
-                          'client_assertion_type': 'urn:ietf:params:oauth:client-assertion-type:jwt-bearer'}).encode()
-                      )['access_token']
+              claims = json.loads(base64.urlsafe_b64decode(value.split('.')[1] + '=='))
+              assert claims['aud'] == aud and claims['sub'] == env['EXPECTED_SUBJECT']
+              assert claims['event_name'] == 'workflow_dispatch' and claims['ref'] == 'refs/heads/pilot-integrated'
+              return value
+
+          endpoint = f'https://login.microsoftonline.com/{env["TENANT"]}/oauth2/v2.0/token'
+          headers = {'Content-Type': 'application/x-www-form-urlencoded'}
+          def exchange_data(value):
+              return urlencode({'client_id': env['CLIENT'], 'scope': 'https://management.azure.com/.default',
+                  'grant_type': 'client_credentials', 'client_assertion': value,
+                  'client_assertion_type': 'urn:ietf:params:oauth:client-assertion-type:jwt-bearer'}).encode()
+
+          token = req(endpoint, method='POST', headers=headers,
+                      data=exchange_data(assertion_for(audience)))['access_token']
           print('pilot_oidc_exchange=accepted; reusable_workflow_pin=verified')
+          wrong_audience = 'api://qsl-monitor-pilot-untrusted'
+          try:
+              with urlopen(Request(endpoint, headers=headers, data=exchange_data(assertion_for(wrong_audience))),
+                           timeout=30):
+                  raise AssertionError('Azure issued a token for an untrusted audience')
+          except HTTPError as error:
+              codes = json.load(error).get('error_codes', [])
+              assert error.code in (400, 401) and any(code in (70021, 700212) for code in codes), (error.code, codes)
+          print('azure_untrusted_audience=rejected')
 
           root = (f'https://management.azure.com/subscriptions/{env["SUBSCRIPTION"]}/resourceGroups/'
                   f'{env["RESOURCE_GROUP"]}/providers/Microsoft.App/jobs/{env["JOB"]}')
@@ -120,7 +162,7 @@ jobs:
               arm(method='PATCH', body={'properties': {'template': template}})
               live = until(arm, lambda value: value['properties']['provisioningState'] in {'Failed', 'Canceled'}
                            or (value['properties']['provisioningState'] == 'Succeeded'
-                               and value['properties']['template']['containers'][0]['image'] == target), 115)
+                               and value['properties']['template'] == template), 115)
               assert live['properties']['provisioningState'] == 'Succeeded'
               assert live['properties']['template'] == template
               for key in ('configuration', 'environmentId', 'workloadProfileName'):
@@ -154,62 +196,4 @@ jobs:
                   assert active == old
           assert arm()['properties']['template'] == original
           print('pilot_template_restored=true; trigger=Manual')
-          PY
-
-  deny:
-    if: (inputs.operation == 'unbound' && github.event_name == 'workflow_dispatch') || (inputs.operation == 'fork' && github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork)
-    runs-on: ubuntu-latest
-    timeout-minutes: 2
-    permissions:
-      id-token: write
-    env:
-      TENANT: ${{ secrets.AZURE_TENANT }}
-      CLIENT: ${{ secrets.AZURE_CLIENT }}
-      EVENT: ${{ github.event_name }}
-    steps:
-      - name: Check that untrusted context cannot exchange for the deployment identity
-        shell: bash
-        run: |
-          python3 -u - <<'PY'
-          import base64
-          import json
-          import os
-          from urllib.error import HTTPError
-          from urllib.parse import urlencode
-          from urllib.request import Request, urlopen
-
-          e = os.environ
-          is_fork = e['EVENT'] == 'pull_request'
-          audience = 'api://AzureADTokenExchange'
-          if not (e.get('ACTIONS_ID_TOKEN_REQUEST_URL') and e.get('ACTIONS_ID_TOKEN_REQUEST_TOKEN')):
-              assert is_fork
-              print('fork_permission_check=github_oidc_unavailable')
-              raise SystemExit(0)
-          req = Request(e['ACTIONS_ID_TOKEN_REQUEST_URL'] + '&' + urlencode({'audience': audience}),
-                        headers={'Authorization': 'Bearer ' + e['ACTIONS_ID_TOKEN_REQUEST_TOKEN']})
-          try:
-              with urlopen(req, timeout=25) as result:
-                  token = json.load(result)['value']
-          except HTTPError as error:
-              assert is_fork and error.code in (401, 403)
-              print('fork_permission_check=github_oidc_rejected')
-              raise SystemExit(0) from None
-          claims = json.loads(base64.urlsafe_b64decode(token.split('.')[1] + '=='))
-          assert ':environment:pilot:' not in claims['sub']
-          assert claims['event_name'] == e['EVENT']
-          if is_fork:
-              print('fork_permission_check=github_subject_not_bound')
-              raise SystemExit(0)
-          assert e['TENANT'] and e['CLIENT']
-          form = urlencode({'client_id': e['CLIENT'], 'scope': 'https://management.azure.com/.default',
-                            'grant_type': 'client_credentials', 'client_assertion': token,
-                            'client_assertion_type': 'urn:ietf:params:oauth:client-assertion-type:jwt-bearer'}).encode()
-          try:
-              with urlopen(Request(f'https://login.microsoftonline.com/{e["TENANT"]}/oauth2/v2.0/token',
-                                   data=form, headers={'Content-Type': 'application/x-www-form-urlencoded'}), timeout=25):
-                  raise AssertionError('untrusted context was issued an Azure token')
-          except HTTPError as error:
-              codes = json.load(error).get('error_codes', [])
-              assert error.code in (400, 401) and any(code in (70021, 700213) for code in codes), (error.code, codes)
-              print(('fork_permission_check' if is_fork else 'unbound_context_check') + '=azure_subject_rejected')
           PY

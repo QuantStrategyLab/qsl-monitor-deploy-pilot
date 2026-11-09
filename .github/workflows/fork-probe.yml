@@ -5,16 +5,31 @@ on:
 permissions: {}
 jobs:
   fork-token-check:
+    name: Deny fork deployment access
     if: github.event.pull_request.head.repo.fork
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
     permissions:
       id-token: write
-    uses: QuantStrategyLab/qsl-monitor-deploy-pilot/.github/workflows/azure-job-deploy.yml@08433f7d0669268d02dd6e1f2be646ce5d94248b
-    with:
-      operation: fork
-  try-deploy:
-    if: github.event.pull_request.head.repo.fork
-    permissions:
-      id-token: write
-    uses: QuantStrategyLab/qsl-monitor-deploy-pilot/.github/workflows/azure-job-deploy.yml@08433f7d0669268d02dd6e1f2be646ce5d94248b
-    with:
-      operation: roundtrip
+    steps:
+      - name: Verify GitHub denies OIDC to the fork
+        shell: bash
+        run: |
+          python3 -u - <<'PY'
+          import os
+          from urllib.error import HTTPError
+          from urllib.parse import urlencode
+          from urllib.request import Request, urlopen
+
+          endpoint = os.environ.get('ACTIONS_ID_TOKEN_REQUEST_URL')
+          token = os.environ.get('ACTIONS_ID_TOKEN_REQUEST_TOKEN')
+          if endpoint and token:
+              req = Request(endpoint + '&' + urlencode({'audience': 'api://AzureADTokenExchange'}),
+                            headers={'Authorization': 'Bearer ' + token})
+              try:
+                  with urlopen(req, timeout=20):
+                      raise AssertionError('GitHub granted a fork OIDC token')
+              except HTTPError as error:
+                  assert error.code in (401, 403)
+          print('fork_permission_check=github_oidc_denied')
+          PY
