@@ -1,14 +1,29 @@
 name: Run Azure deployment pilot
 on:
   workflow_dispatch:
+    inputs:
+      fork_run:
+        description: Completed fork permission run
+        required: true
+        type: string
+      fork_pr:
+        description: Pull request from the test fork
+        required: true
+        type: string
 permissions: {}
+concurrency:
+  group: isolated-monitor-deployment
+  cancel-in-progress: false
 jobs:
   rollout:
     permissions:
       id-token: write
-    uses: QuantStrategyLab/qsl-monitor-deploy-pilot/.github/workflows/azure-job-deploy.yml@08433f7d0669268d02dd6e1f2be646ce5d94248b
+      actions: read
+      pull-requests: read
+    uses: QuantStrategyLab/qsl-monitor-deploy-pilot/.github/workflows/azure-job-deploy.yml@5f77cce04235d54c0544b62dc2c3fce671451e65
     with:
-      operation: roundtrip
+      fork_run: ${{ inputs.fork_run }}
+      fork_pr: ${{ inputs.fork_pr }}
     secrets:
       AZURE_TENANT: ${{ secrets.AZURE_TENANT }}
       AZURE_CLIENT: ${{ secrets.AZURE_CLIENT }}
@@ -18,12 +33,3 @@ jobs:
       PILOT_PREVIOUS_IMAGE: ${{ secrets.PILOT_PREVIOUS_IMAGE }}
       PILOT_CANDIDATE_IMAGE: ${{ secrets.PILOT_CANDIDATE_IMAGE }}
       PILOT_EXPECTED_SUBJECT: ${{ secrets.PILOT_EXPECTED_SUBJECT }}
-  wrong-context:
-    permissions:
-      id-token: write
-    uses: QuantStrategyLab/qsl-monitor-deploy-pilot/.github/workflows/azure-job-deploy.yml@08433f7d0669268d02dd6e1f2be646ce5d94248b
-    with:
-      operation: unbound
-    secrets:
-      AZURE_TENANT: ${{ secrets.AZURE_TENANT }}
-      AZURE_CLIENT: ${{ secrets.AZURE_CLIENT }}
