@@ -1,0 +1,191 @@
+name: Azure job deployment pilot
+on:
+  workflow_call:
+    inputs:
+      operation:
+        required: true
+        type: string
+permissions: {}
+jobs:
+  deploy:
+    if: inputs.operation == 'roundtrip' && github.event_name == 'workflow_dispatch' && github.repository == 'QuantStrategyLab/qsl-monitor-deploy-pilot' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 9
+    environment: pilot
+    permissions:
+      id-token: write
+    env:
+      TENANT: ${{ vars.AZURE_TENANT }}
+      CLIENT: ${{ vars.AZURE_CLIENT }}
+      SUBSCRIPTION: ${{ vars.AZURE_SUBSCRIPTION }}
+      RESOURCE_GROUP: ${{ vars.PILOT_RESOURCE_GROUP }}
+      JOB: ${{ vars.PILOT_JOB }}
+      OLD_IMAGE: ${{ vars.PILOT_PREVIOUS_IMAGE }}
+      NEW_IMAGE: ${{ vars.PILOT_CANDIDATE_IMAGE }}
+      EXPECTED_SUBJECT: ${{ vars.PILOT_EXPECTED_SUBJECT }}
+    steps:
+      - name: Verify identity, deploy fixed image and roll back
+        shell: bash
+        run: |
+          python3 -u - <<'PY'
+          import base64
+          import copy
+          import json
+          import os
+          import re
+          import time
+          from urllib.error import HTTPError
+          from urllib.parse import urlencode
+          from urllib.request import Request, urlopen
+
+          def req(url, *, headers=None, data=None, method='GET'):
+              try:
+                  with urlopen(Request(url, headers=headers or {}, data=data, method=method), timeout=30) as res:
+                      return json.loads(res.read() or '{}')
+              except HTTPError as error:
+                  raise RuntimeError(f'{method} HTTP {error.code}') from None
+
+          audience = 'api://AzureADTokenExchange'
+          env = os.environ
+          assertion = req(env['ACTIONS_ID_TOKEN_REQUEST_URL'] + '&' + urlencode({'audience': audience}),
+                          headers={'Authorization': 'Bearer ' + env['ACTIONS_ID_TOKEN_REQUEST_TOKEN']})['value']
+          claims = json.loads(base64.urlsafe_b64decode(assertion.split('.')[1] + '=='))
+          assert claims['sub'] == env['EXPECTED_SUBJECT'] and claims['aud'] == audience
+          assert claims['event_name'] == 'workflow_dispatch' and claims['ref'] == 'refs/heads/main'
+          token = req(f'https://login.microsoftonline.com/{env["TENANT"]}/oauth2/v2.0/token',
+                      method='POST', headers={'Content-Type': 'application/x-www-form-urlencoded'},
+                      data=urlencode({'client_id': env['CLIENT'], 'scope': 'https://management.azure.com/.default',
+                          'grant_type': 'client_credentials', 'client_assertion': assertion,
+                          'client_assertion_type': 'urn:ietf:params:oauth:client-assertion-type:jwt-bearer'}).encode()
+                      )['access_token']
+          print('pilot_oidc_exchange=accepted; reusable_workflow_pin=verified')
+
+          root = (f'https://management.azure.com/subscriptions/{env["SUBSCRIPTION"]}/resourceGroups/'
+                  f'{env["RESOURCE_GROUP"]}/providers/Microsoft.App/jobs/{env["JOB"]}')
+          def arm(suffix='', *, method='GET', body=None):
+              return req(root + suffix + '?api-version=2025-01-01', method=method,
+                         headers={'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json'},
+                         data=None if body is None else json.dumps(body).encode())
+
+          def until(fetch, done, seconds):
+              deadline = time.monotonic() + seconds
+              while True:
+                  obj = fetch()
+                  if done(obj):
+                      return obj
+                  if time.monotonic() >= deadline:
+                      raise TimeoutError('Azure readback timed out')
+                  time.sleep(4)
+
+          old, new = env['OLD_IMAGE'], env['NEW_IMAGE']
+          assert old != new and old.split('@')[0] == new.split('@')[0]
+          assert all(re.fullmatch(r'ghcr\.io/[a-z0-9_./-]+@sha256:[0-9a-f]{64}', image)
+                     for image in (old, new))
+          before = arm()
+          props = before['properties']
+          assert props['provisioningState'] == 'Succeeded'
+          assert props['configuration']['triggerType'] == 'Manual'
+          assert not before.get('identity') or before['identity'].get('type') == 'None'
+          original = props['template']
+          container, = original['containers']
+          assert container['image'] == old and not container.get('env')
+          assert not original.get('volumes') and container['command'] == ['python']
+
+          def change(expected, target):
+              current = arm()
+              assert current['properties']['template']['containers'][0]['image'] == expected
+              template = copy.deepcopy(original)
+              template['containers'][0]['image'] = target
+              arm(method='PATCH', body={'properties': {'template': template}})
+              live = until(arm, lambda value: value['properties']['provisioningState'] in {'Failed', 'Canceled'}
+                           or (value['properties']['provisioningState'] == 'Succeeded'
+                               and value['properties']['template']['containers'][0]['image'] == target), 115)
+              assert live['properties']['provisioningState'] == 'Succeeded'
+              assert live['properties']['template'] == template
+              for key in ('configuration', 'environmentId', 'workloadProfileName'):
+                  assert live['properties'][key] == props[key]
+              assert live.get('identity') == before.get('identity')
+
+          def run_image(label):
+              def executions():
+                  return arm('/executions').get('value', [])
+              seen = {row['name'] for row in executions()}
+              begin = time.monotonic()
+              arm('/start', method='POST')
+              def result():
+                  rows = [row for row in executions() if row['name'] not in seen]
+                  assert len(rows) <= 1
+                  return rows[0]['properties']['status'] if rows else None
+              status = until(result, lambda v: v in {'Succeeded', 'Failed', 'Stopped', 'Canceled', 'Cancelled'}, 115)
+              assert status == 'Succeeded'
+              print(f'{label}=Succeeded; submit_to_readback_seconds={time.monotonic()-begin:.1f}')
+
+          try:
+              change(old, new)
+              run_image('fixed_candidate_run')
+          finally:
+              live = arm()
+              active = live['properties']['template']['containers'][0]['image']
+              if active == new:
+                  change(new, old)
+                  run_image('fixed_rollback_run')
+              else:
+                  assert active == old
+          assert arm()['properties']['template'] == original
+          print('pilot_template_restored=true; trigger=Manual')
+          PY
+
+  deny:
+    if: (inputs.operation == 'unbound' && github.event_name == 'workflow_dispatch') || (inputs.operation == 'fork' && github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork)
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    permissions:
+      id-token: write
+    env:
+      TENANT: ${{ vars.AZURE_TENANT }}
+      CLIENT: ${{ vars.AZURE_CLIENT }}
+      EVENT: ${{ github.event_name }}
+    steps:
+      - name: Check that untrusted context cannot exchange for the deployment identity
+        shell: bash
+        run: |
+          python3 -u - <<'PY'
+          import base64
+          import json
+          import os
+          from urllib.error import HTTPError
+          from urllib.parse import urlencode
+          from urllib.request import Request, urlopen
+
+          e = os.environ
+          is_fork = e['EVENT'] == 'pull_request'
+          audience = 'api://AzureADTokenExchange'
+          if not (e.get('ACTIONS_ID_TOKEN_REQUEST_URL') and e.get('ACTIONS_ID_TOKEN_REQUEST_TOKEN')):
+              assert is_fork
+              print('fork_permission_check=github_oidc_unavailable')
+              raise SystemExit(0)
+          req = Request(e['ACTIONS_ID_TOKEN_REQUEST_URL'] + '&' + urlencode({'audience': audience}),
+                        headers={'Authorization': 'Bearer ' + e['ACTIONS_ID_TOKEN_REQUEST_TOKEN']})
+          try:
+              with urlopen(req, timeout=25) as result:
+                  token = json.load(result)['value']
+          except HTTPError as error:
+              assert is_fork and error.code in (401, 403)
+              print('fork_permission_check=github_oidc_rejected')
+              raise SystemExit(0) from None
+          claims = json.loads(base64.urlsafe_b64decode(token.split('.')[1] + '=='))
+          assert ':environment:pilot:' not in claims['sub']
+          assert claims['event_name'] == e['EVENT']
+          assert e['TENANT'] and e['CLIENT']
+          form = urlencode({'client_id': e['CLIENT'], 'scope': 'https://management.azure.com/.default',
+                            'grant_type': 'client_credentials', 'client_assertion': token,
+                            'client_assertion_type': 'urn:ietf:params:oauth:client-assertion-type:jwt-bearer'}).encode()
+          try:
+              with urlopen(Request(f'https://login.microsoftonline.com/{e["TENANT"]}/oauth2/v2.0/token',
+                                   data=form, headers={'Content-Type': 'application/x-www-form-urlencoded'}), timeout=25):
+                  raise AssertionError('untrusted context was issued an Azure token')
+          except HTTPError as error:
+              codes = json.load(error).get('error_codes', [])
+              assert error.code in (400, 401) and any(code in (70021, 700213) for code in codes), (error.code, codes)
+              print(('fork_permission_check' if is_fork else 'unbound_context_check') + '=azure_subject_rejected')
+          PY
