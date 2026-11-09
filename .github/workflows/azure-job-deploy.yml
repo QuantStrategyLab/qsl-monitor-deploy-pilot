@@ -25,7 +25,7 @@ on:
 permissions: {}
 jobs:
   deploy:
-    if: inputs.operation == 'roundtrip' && github.event_name == 'workflow_dispatch' && github.repository == 'QuantStrategyLab/qsl-monitor-deploy-pilot' && github.ref == 'refs/heads/pilot-release'
+    if: inputs.operation == 'roundtrip' && github.event_name == 'workflow_dispatch' && github.repository == 'QuantStrategyLab/qsl-monitor-deploy-pilot' && github.ref == 'refs/heads/pilot-oidc-proof'
     runs-on: ubuntu-latest
     timeout-minutes: 9
     environment: pilot
@@ -67,8 +67,12 @@ jobs:
           assertion = req(env['ACTIONS_ID_TOKEN_REQUEST_URL'] + '&' + urlencode({'audience': audience}),
                           headers={'Authorization': 'Bearer ' + env['ACTIONS_ID_TOKEN_REQUEST_TOKEN']})['value']
           claims = json.loads(base64.urlsafe_b64decode(assertion.split('.')[1] + '=='))
-          assert claims['sub'] == env['EXPECTED_SUBJECT'] and claims['aud'] == audience
-          assert claims['event_name'] == 'workflow_dispatch' and claims['ref'] == 'refs/heads/pilot-release'
+          assert claims['aud'] == audience, 'unexpected OIDC audience'
+          if claims['sub'] != env['EXPECTED_SUBJECT']:
+              assert re.fullmatch(r'[a-zA-Z0-9_./:@%-]{1,350}', claims['sub'])
+              print('public_pilot_subject=' + claims['sub'])
+              raise AssertionError('exact OIDC subject differs from pilot configuration')
+          assert claims['event_name'] == 'workflow_dispatch' and claims['ref'] == 'refs/heads/pilot-oidc-proof'
           token = req(f'https://login.microsoftonline.com/{env["TENANT"]}/oauth2/v2.0/token',
                       method='POST', headers={'Content-Type': 'application/x-www-form-urlencoded'},
                       data=urlencode({'client_id': env['CLIENT'], 'scope': 'https://management.azure.com/.default',
