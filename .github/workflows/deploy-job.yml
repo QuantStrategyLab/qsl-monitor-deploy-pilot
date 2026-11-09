@@ -14,7 +14,7 @@ on:
 permissions: {}
 jobs:
   release:
-    if: github.event_name == 'workflow_dispatch' && (inputs.provider == 'azure' || inputs.provider == 'gcp')
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 8
     environment: ${{ inputs.environment }}
@@ -194,7 +194,9 @@ jobs:
               print(f"{operation} verified: fixed image and unchanged job configuration")
 
 
-          provider = {"azure": AzureJob, "gcp": CloudRunJob}[os.environ["PROVIDER"]]
+          provider = {"azure": AzureJob, "gcp": CloudRunJob}.get(os.environ["PROVIDER"])
+          if provider is None:
+              raise ValueError("Expected azure or gcp")
           release(provider(os.environ["RESOURCE"]), os.environ["PREVIOUS"],
                   os.environ["CANDIDATE"], os.environ["OPERATION"])
           PY
